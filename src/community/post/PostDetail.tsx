@@ -379,15 +379,15 @@ export default function PostDetailPage() {
     const badgeIcon =
       post.badge === '모집중' ? recruiting : post.badge === '모집완료' ? completed : null;
 
-    // ★ 변경: userId을 넘겨 사용자별 로컬 키 사용, 초기 상태 null
-    const { applied, setApplied, markApplied, isChecking } = useAppliedPersistence(post.id, current_user_id);
+    const { applied, setApplied, markApplied, isChecking, isReady } =
+      useAppliedPersistence(post.id, current_user_id);
 
     const { mutateAsync: doApply, isPending: applying } = useMutation({
       mutationFn: () => applyStudy({ post_id: post.id, user: current_user_id }),
     });
 
     const canApply =
-      applied === false && post.badge === '모집중' && post.author_id !== current_user_id;
+      isReady && applied === false && post.badge === '모집중' && post.author_id !== current_user_id;
 
     return (
       <motion.section
@@ -466,14 +466,14 @@ export default function PostDetailPage() {
                     await refetchDetail();
                     alert('신청이 접수되었어요.');
                   } catch {
-                    // ★ 실패 시 즉시 롤백
+                    // 실패 시 즉시 롤백
                     setApplied(false);
                     saveAppliedToStorage(post.id, current_user_id, false);
                     alert('신청에 실패했습니다. 다시 시도해주세요.');
                   }
                 }}
               >
-                {isChecking ? '확인 중…' : applied ? '신청완료' : '신청하기'}
+                {!isReady || isChecking ? '확인 중…' : applied ? '신청완료' : '신청하기'}
               </button>
             </div>
           </motion.div>
@@ -529,33 +529,61 @@ function saveAppliedToStorage(postId: number, userId: number, val: boolean) {
 }
 
 /** -----------------------------
- *  신청 상태 훅 (초기값 null)
+ *  API Base & 신청 상태 훅
  *  ----------------------------*/
+function apiBase() {
+  // 끝 슬래시 제거
+  return (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+}
+
 function useAppliedPersistence(postId: number, userId: number) {
-  // null: 서버 확인중
+  // applied: null = 서버 확인중
   const [applied, setApplied] = useState<boolean | null>(null);
+  const [isReady, setIsReady] = useState(false); // 검증 끝나야 버튼 활성
 
   useEffect(() => {
     let aborted = false;
     (async () => {
       try {
-        const res = await fetch(`/api/v1/community/post/${postId}/study-application`, {
-          credentials: 'include',
-        });
+        const url = `${apiBase()}/api/v1/community/post/${postId}/study-application`;
+        const res = await fetch(url, { credentials: 'include' });
         if (aborted) return;
-        if (res.status === 200) {
-          setApplied(true);
-          saveAppliedToStorage(postId, userId, true);
+
+        // 인증 리다이렉트나 비-JSON(HTML) 응답은 잘못된 라우팅으로 보고 false
+        if (res.redirected) {
+          setApplied(false);
+          saveAppliedToStorage(postId, userId, false);
+          return;
+        }
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          setApplied(false);
+          saveAppliedToStorage(postId, userId, false);
+          return;
+        }
+
+        if (res.ok) {
+          // 권장 응답: { applied: boolean }
+          const data = await res.json().catch(() => ({} as any));
+          if (typeof data?.applied === 'boolean') {
+            setApplied(data.applied);
+            saveAppliedToStorage(postId, userId, data.applied);
+          } else {
+            // 코드 호환(서버가 200/404만 사용할 때)
+            setApplied(true);
+            saveAppliedToStorage(postId, userId, true);
+          }
         } else if (res.status === 404) {
           setApplied(false);
           saveAppliedToStorage(postId, userId, false);
         } else {
-          // 예상치 못한 상태코드면 안전하게 false로
           setApplied(false);
         }
       } catch {
-        // 네트워크 오류 시 로컬 기준으로 추정
+        // 네트워크 오류: 로컬 기준 추정
         setApplied(loadAppliedFromStorage(postId, userId));
+      } finally {
+        if (!aborted) setIsReady(true);
       }
     })();
     return () => {
@@ -568,5 +596,5 @@ function useAppliedPersistence(postId: number, userId: number) {
     saveAppliedToStorage(postId, userId, true);
   };
 
-  return { applied, setApplied, markApplied, isChecking: applied === null };
+  return { applied, setApplied, markApplied, isChecking: applied === null, isReady };
 }
